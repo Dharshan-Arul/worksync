@@ -1,3 +1,4 @@
+
 import { NextResponse, type NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { createClient } from "@/lib/supabase/server";
@@ -13,39 +14,76 @@ export async function GET(request: NextRequest) {
 
   if (code) {
     const { error } = await supabase.auth.exchangeCodeForSession(code);
+
     if (!error) {
       const {
         data: { user },
       } = await supabase.auth.getUser();
 
+      let dbUser = null;
+
       if (user?.email) {
-        await prisma.user.upsert({
-          where: { id: user.id },
-          create: {
-            id: user.id,
-            email: user.email,
-            name:
-              (typeof user.user_metadata.name === "string" && user.user_metadata.name) ||
-              user.email.split("@")[0],
-            avatarUrl:
-              typeof user.user_metadata.avatar_url === "string"
-                ? user.user_metadata.avatar_url
-                : null,
-          },
-          update: {
-            email: user.email,
-            ...(typeof user.user_metadata.name === "string"
-              ? { name: user.user_metadata.name }
-              : {}),
-          },
+        const email = user.email;
+        const name =
+          (typeof user.user_metadata.name === "string" &&
+            user.user_metadata.name) ||
+          email.split("@")[0];
+
+        const avatarUrl =
+          typeof user.user_metadata.avatar_url === "string"
+            ? user.user_metadata.avatar_url
+            : null;
+
+        // Check email first to avoid a unique-email conflict.
+        dbUser = await prisma.user.findUnique({
+          where: { email },
         });
+
+        if (dbUser) {
+          if (dbUser.id === user.id) {
+            dbUser = await prisma.user.update({
+              where: { id: user.id },
+              data: { name, avatarUrl },
+            });
+          }
+          // Preserve the existing ID if other records may reference it.
+        } else {
+          const existingById = await prisma.user.findUnique({
+            where: { id: user.id },
+          });
+
+          if (existingById) {
+            dbUser = await prisma.user.update({
+              where: { id: user.id },
+              data: { email, name, avatarUrl },
+            });
+          } else {
+            dbUser = await prisma.user.create({
+              data: {
+                id: user.id,
+                email,
+                name,
+                avatarUrl,
+              },
+            });
+          }
+        }
       }
 
-      const requestedPath = safeNextPath(request.nextUrl.searchParams.get("next"));
-      const hasWorkspace = user
-        ? await prisma.workspaceMember.count({ where: { userId: user.id } })
+      const requestedPath = safeNextPath(
+        request.nextUrl.searchParams.get("next")
+      );
+
+      const hasWorkspace = dbUser
+        ? await prisma.workspaceMember.count({
+            where: { userId: dbUser.id },
+          })
         : 0;
-      const destination = requestedPath ?? (hasWorkspace ? "/dashboard" : "/onboarding/workspace");
+
+      const destination =
+        requestedPath ??
+        (hasWorkspace ? "/dashboard" : "/onboarding/workspace");
+
       return NextResponse.redirect(new URL(destination, request.url));
     }
   }
